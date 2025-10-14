@@ -66,6 +66,13 @@ python3 swaggerhunter.py -u 'http://94.237.123.178:32175/swagger/v1/swagger.json
 
 https://github.com/user-attachments/assets/12aa259b-23c7-459e-9873-cdf05d631d60
 
+```bash
+python3 swaggerhunter.py -u 'http://94.237.123.178:32175/swagger/v1/swagger.json' --probe --method GET --token 'xxxxxxxxxxxxxxxxxxxxx' --limit 5 --postman /mnt/d/autoswagger/swaggerapi.json
+```
+
+https://github.com/user-attachments/assets/a37f2d10-035b-4120-999d-f4a2f7e13b31
+
+
 
 
 
