@@ -275,12 +275,6 @@ def export_burp_xml(report: Dict[str, Any], filename: str) -> None:
     print(f"[*] Burp sitemap written to {filename}")
 
 def export_postman(report: dict, filename: str, collection_name: str='SwaggerHunter Collection', token: str = None, limit: int = 0, methods: list = None) -> None:
-    """
-    Export Swagger endpoints to a Postman v2.1 collection.
-    - token: optional Bearer token for Authorization header
-    - limit: number of endpoints to include (0 = all)
-    - methods: optional list of HTTP methods to filter (upper-case strings)
-    """
     items = []
 
     endpoints = report.get('endpoints', [])
