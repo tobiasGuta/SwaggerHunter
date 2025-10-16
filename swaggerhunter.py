@@ -437,13 +437,11 @@ def interactive_tui():
     ))
     
     swagger_url = Prompt.ask("\n[bold green]?[/bold green] Enter Swagger/OpenAPI URL (or file:/// path)")
-    
     if not swagger_url:
         console.print("[red]✗[/red] URL is required!")
         sys.exit(1)
     
     console.print(f"\n[cyan]→[/cyan] Fetching specification from: [yellow]{swagger_url}[/yellow]")
-    
     try:
         swagger = fetch_swagger(swagger_url, timeout=DEFAULT_TIMEOUT)
     except Exception as e:
@@ -462,130 +460,144 @@ def interactive_tui():
         swagger_resolved = swagger
     
     report = enumerate_swagger(swagger_resolved, base, version)
-    
     console.print(f"\n[green]✓[/green] Found [bold]{len(report['endpoints'])}[/bold] endpoints\n")
     
-    table = Table(title="Endpoints Preview", box=box.ROUNDED, show_lines=False)
-    table.add_column("#", style="dim", width=4)
-    table.add_column("Method", style="bold")
-    table.add_column("Path", style="cyan")
-    table.add_column("Summary", style="dim", overflow="fold")
-    
-    for i, ep in enumerate(report['endpoints'][:10], 1):
-        method_color = {
-            'GET': 'green', 'POST': 'yellow', 'PUT': 'cyan',
-            'PATCH': 'magenta', 'DELETE': 'red'
-        }.get(ep['method'], 'white')
+    # keep the interactive menu looping until the user chooses Exit (6)
+    while True:
+        table = Table(title="Endpoints Preview", box=box.ROUNDED, show_lines=False)
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Method", style="bold")
+        table.add_column("Path", style="cyan")
+        table.add_column("Summary", style="dim", overflow="fold")
         
-        table.add_row(
-            str(i),
-            f"[{method_color}]{ep['method']}[/{method_color}]",
-            ep['path_template'],
-            (ep.get('summary') or '')[:50]
-        )
-    
-    if len(report['endpoints']) > 10:
-        table.add_row("...", "...", f"... and {len(report['endpoints']) - 10} more", "...")
-    
-    console.print(table)
-    
-    console.print("\n[bold]Actions:[/bold]")
-    console.print("  [cyan]1.[/cyan] Probe endpoints")
-    console.print("  [cyan]2.[/cyan] Export to JSON")
-    console.print("  [cyan]3.[/cyan] Export to Postman")
-    console.print("  [cyan]4.[/cyan] Export to Burp XML")
-    console.print("  [cyan]5.[/cyan] Show verbose output")
-    console.print("  [cyan]6.[/cyan] Exit")
-    
-    choice = Prompt.ask("\n[bold green]?[/bold green] Select action", choices=["1", "2", "3", "4", "5", "6"], default="6")
-    
-    if choice == "1":
-        do_probe = True
-        token = Prompt.ask("\n[bold green]?[/bold green] JWT Bearer token (optional, press Enter to skip)", default="")
-        method_filter = Prompt.ask("[bold green]?[/bold green] Filter methods (e.g., GET,POST or press Enter for all)", default="")
-        limit = Prompt.ask("[bold green]?[/bold green] Limit number of endpoints (0 = all)", default="0")
-        concurrency = Prompt.ask("[bold green]?[/bold green] Concurrency (threads)", default="5")
+        for i, ep in enumerate(report['endpoints'][:10], 1):
+            method_color = {
+                'GET': 'green', 'POST': 'yellow', 'PUT': 'cyan',
+                'PATCH': 'magenta', 'DELETE': 'red'
+            }.get(ep['method'], 'white')
+            
+            table.add_row(
+                str(i),
+                f"[{method_color}]{ep['method']}[/{method_color}]",
+                ep['path_template'],
+                (ep.get('summary') or '')[:50]
+            )
         
-        endpoints_filtered = report['endpoints']
-        if method_filter:
-            allowed_methods = [m.strip().upper() for m in method_filter.split(',')]
-            endpoints_filtered = [ep for ep in endpoints_filtered if ep.get('method', '').upper() in allowed_methods]
-            console.print(f"[cyan]→[/cyan] Filtered to {len(endpoints_filtered)} endpoints")
+        if len(report['endpoints']) > 10:
+            table.add_row("...", "...", f"... and {len(report['endpoints']) - 10} more", "...")
         
-        if int(limit) > 0:
-            endpoints_filtered = endpoints_filtered[:int(limit)]
+        console.print(table)
         
-        console.print(f"\n[yellow]→[/yellow] Probing {len(endpoints_filtered)} endpoints...\n")
+        console.print("\n[bold]Actions:[/bold]")
+        console.print("  [cyan]1.[/cyan] Probe endpoints")
+        console.print("  [cyan]2.[/cyan] Export to JSON")
+        console.print("  [cyan]3.[/cyan] Export to Postman")
+        console.print("  [cyan]4.[/cyan] Export to Burp XML")
+        console.print("  [cyan]5.[/cyan] Show verbose output")
+        console.print("  [cyan]6.[/cyan] Exit")
         
-        probe_results = []
-        with ThreadPoolExecutor(max_workers=int(concurrency)) as ex:
-            futures = {ex.submit(conservative_probe, ep, DEFAULT_TIMEOUT, 0.1, token if token else None): ep for ep in endpoints_filtered}
-            for fut in as_completed(futures):
-                ep = futures[fut]
-                try:
-                    r = fut.result()
-                except Exception as e:
-                    r = {'url': ep.get('url_example'), 'method': ep.get('method'), 'error': str(e)}
-                probe_results.append({'endpoint': ep, 'result': r})
-                
-                status = r.get('status')
-                url = r.get('url') or ep.get('url_example')
-                meth = r.get('method') or ep.get('method')
-                
-                if status is None:
-                    console.print(f"[red]✗ {meth} {url} -> error: {r.get('error')}[/red]")
-                elif 200 <= status < 300:
-                    console.print(f"[green]✓ [{status}] {meth} {url}[/green]")
-                elif 300 <= status < 400:
-                    console.print(f"[yellow]→ [{status}] {meth} {url}[/yellow]")
-                else:
-                    console.print(f"[red]✗ [{status}] {meth} {url}[/red]")
+        choice = Prompt.ask("\n[bold green]?[/bold green] Select action", choices=["1", "2", "3", "4", "5", "6"], default="6")
         
-        ok = sum(1 for p in probe_results if p['result'].get('status') and 200 <= p['result']['status'] < 300)
-        redirects = sum(1 for p in probe_results if p['result'].get('status') and 300 <= p['result']['status'] < 400)
-        client_err = sum(1 for p in probe_results if p['result'].get('status') and 400 <= p['result']['status'] < 500)
-        server_err = sum(1 for p in probe_results if p['result'].get('status') and 500 <= p['result']['status'] < 600)
+        # ---------- Option 1: Probe ----------
+        if choice == "1":
+            token = Prompt.ask("\n[bold green]?[/bold green] JWT Bearer token (optional, press Enter to skip)", default="")
+            method_filter = Prompt.ask("[bold green]?[/bold green] Filter methods (e.g., GET,POST or press Enter for all)", default="")
+            limit = Prompt.ask("[bold green]?[/bold green] Limit number of endpoints (0 = all)", default="0")
+            concurrency = Prompt.ask("[bold green]?[/bold green] Concurrency (threads)", default="5")
+            
+            endpoints_filtered = report['endpoints']
+            if method_filter:
+                allowed_methods = [m.strip().upper() for m in method_filter.split(',')]
+                endpoints_filtered = [ep for ep in endpoints_filtered if ep.get('method', '').upper() in allowed_methods]
+                console.print(f"[cyan]→[/cyan] Filtered to {len(endpoints_filtered)} endpoints")
+            
+            if int(limit) > 0:
+                endpoints_filtered = endpoints_filtered[:int(limit)]
+            
+            console.print(f"\n[yellow]→[/yellow] Probing {len(endpoints_filtered)} endpoints...\n")
+            
+            probe_results = []
+            with ThreadPoolExecutor(max_workers=int(concurrency)) as ex:
+                futures = {ex.submit(conservative_probe, ep, DEFAULT_TIMEOUT, 0.1, token if token else None): ep for ep in endpoints_filtered}
+                for fut in as_completed(futures):
+                    ep = futures[fut]
+                    try:
+                        r = fut.result()
+                    except Exception as e:
+                        r = {'url': ep.get('url_example'), 'method': ep.get('method'), 'error': str(e)}
+                    probe_results.append({'endpoint': ep, 'result': r})
+                    
+                    status = r.get('status')
+                    url = r.get('url') or ep.get('url_example')
+                    meth = r.get('method') or ep.get('method')
+                    
+                    if status is None:
+                        console.print(f"[red]✗ {meth} {url} -> error: {r.get('error')}[/red]")
+                    elif 200 <= status < 300:
+                        console.print(f"[green]✓ [{status}] {meth} {url}[/green]")
+                    elif 300 <= status < 400:
+                        console.print(f"[yellow]→ [{status}] {meth} {url}[/yellow]")
+                    else:
+                        console.print(f"[red]✗ [{status}] {meth} {url}[/red]")
+            
+            ok = sum(1 for p in probe_results if p['result'].get('status') and 200 <= p['result']['status'] < 300)
+            redirects = sum(1 for p in probe_results if p['result'].get('status') and 300 <= p['result']['status'] < 400)
+            client_err = sum(1 for p in probe_results if p['result'].get('status') and 400 <= p['result']['status'] < 500)
+            server_err = sum(1 for p in probe_results if p['result'].get('status') and 500 <= p['result']['status'] < 600)
+            
+            console.print(f"\n[bold]Probe Summary:[/bold] [green]{ok} OK[/green], [yellow]{redirects} redirects[/yellow], [red]{client_err} client errors[/red], [red]{server_err} server errors[/red]")
+            
+            if Confirm.ask("\n[bold green]?[/bold green] Save probe results to JSON?"):
+                filename = Prompt.ask("Filename", default="probe_results.json")
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump({'endpoints': endpoints_filtered, 'probe_results': probe_results}, f, indent=2)
+                console.print(f"[green]✓[/green] Saved to [cyan]{filename}[/cyan]")
+            
+            # loop back to menu
+            continue
         
-        console.print(f"\n[bold]Probe Summary:[/bold] [green]{ok} OK[/green], [yellow]{redirects} redirects[/yellow], [red]{client_err} client errors[/red], [red]{server_err} server errors[/red]")
-        
-        if Confirm.ask("\n[bold green]?[/bold green] Save probe results to JSON?"):
-            filename = Prompt.ask("Filename", default="probe_results.json")
+        # ---------- Option 2: Export JSON ----------
+        elif choice == "2":
+            filename = Prompt.ask("\n[bold green]?[/bold green] JSON output filename", default="endpoints.json")
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump({'endpoints': endpoints_filtered, 'probe_results': probe_results}, f, indent=2)
-            console.print(f"[green]✓[/green] Saved to [cyan]{filename}[/cyan]")
-    
-    elif choice == "2":
-        filename = Prompt.ask("\n[bold green]?[/bold green] JSON output filename", default="endpoints.json")
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2)
-        console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
-    
-    elif choice == "3":
-        filename = Prompt.ask("\n[bold green]?[/bold green] Postman collection filename", default="collection.json")
-        token = Prompt.ask("[bold green]?[/bold green] JWT Bearer token (optional)", default="")
-        export_postman(report, filename, token=token if token else None)
-        console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
-    
-    elif choice == "4":
-        filename = Prompt.ask("\n[bold green]?[/bold green] Burp XML filename", default="burp_sitemap.xml")
-        export_burp_xml(report, filename)
-        console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
-    
-    elif choice == "5":
-        console.print("\n[bold cyan]Verbose Endpoint Details:[/bold cyan]\n")
-        for i, e in enumerate(report['endpoints'][:50], 1):
-            console.print(f"[bold]{i:03d}. [{e['method']}] {e['path_template']}[/bold]")
-            if e.get('summary'):
-                console.print(f"  [blue]summary:[/blue] {clean_html(e['summary'])}")
-            if e.get('description'):
-                console.print(f"  [cyan]description:[/cyan] {clean_html(e['description'])[:200]}")
-            if e.get('tags'):
-                console.print(f"  [yellow]tags:[/yellow] {', '.join(e['tags'])}")
-            console.print()
-    
-    elif choice == "6":
-        console.print("\n[dim]Goodbye![/dim]")
-        sys.exit(0)
+                json.dump(report, f, indent=2)
+            console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
+            continue
+        
+        # ---------- Option 3: Export Postman ----------
+        elif choice == "3":
+            filename = Prompt.ask("\n[bold green]?[/bold green] Postman collection filename", default="collection.json")
+            token = Prompt.ask("[bold green]?[/bold green] JWT Bearer token (optional)", default="")
+            export_postman(report, filename, token=token if token else None)
+            console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
+            continue
+        
+        # ---------- Option 4: Export Burp ----------
+        elif choice == "4":
+            filename = Prompt.ask("\n[bold green]?[/bold green] Burp XML filename", default="burp_sitemap.xml")
+            export_burp_xml(report, filename)
+            console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
+            continue
+        
+        # ---------- Option 5: Verbose output ----------
+        elif choice == "5":
+            console.print("\n[bold cyan]Verbose Endpoint Details:[/bold cyan]\n")
+            for i, e in enumerate(report['endpoints'][:50], 1):
+                console.print(f"[bold]{i:03d}. [{e['method']}] {e['path_template']}[/bold]")
+                if e.get('summary'):
+                    console.print(f"  [blue]summary:[/blue] {clean_html(e['summary'])}")
+                if e.get('description'):
+                    console.print(f"  [cyan]description:[/cyan] {clean_html(e['description'])[:200]}")
+                if e.get('tags'):
+                    console.print(f"  [yellow]tags:[/yellow] {', '.join(e['tags'])}")
+                console.print()
+            # after showing verbose output, loop back to menu
+            continue
+        
+        # ---------- Option 6: Exit ----------
+        elif choice == "6":
+            console.print("\n[dim]Goodbye![/dim]")
+            return
 
 def main():
     if len(sys.argv) == 1:
