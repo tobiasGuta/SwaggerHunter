@@ -44,6 +44,8 @@ pip install -r requirements.txt
 python3 swaggerhunter.py
 ```
 
+<img width="1315" height="347" alt="image" src="https://github.com/user-attachments/assets/cb1c4b1e-69d0-43ad-8def-777bf201d57a" />
+
 ## Screenshot
 
 ```bash
