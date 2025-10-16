@@ -21,6 +21,41 @@ try:
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
+    
+ascii_art = r"""
+███████╗██╗    ██╗ █████╗  ██████╗  ██████╗ ███████╗██████╗     ██╗  ██╗██╗   ██╗███╗   ██╗████████╗███████╗██████╗ 
+██╔════╝██║    ██║██╔══██╗██╔════╝ ██╔════╝ ██╔════╝██╔══██╗    ██║  ██║██║   ██║████╗  ██║╚══██╔══╝██╔════╝██╔══██╗
+███████╗██║ █╗ ██║███████║██║  ███╗██║  ███╗█████╗  ██████╔╝    ███████║██║   ██║██╔██╗ ██║   ██║   █████╗  ██████╔╝
+╚════██║██║███╗██║██╔══██║██║   ██║██║   ██║██╔══╝  ██╔══██╗    ██╔══██║██║   ██║██║╚██╗██║   ██║   ██╔══╝  ██╔══██╗
+███████║╚███╔███╔╝██║  ██║╚██████╔╝╚██████╔╝███████╗██║  ██║    ██║  ██║╚██████╔╝██║ ╚████║   ██║   ███████╗██║  ██║
+╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝    ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
+"""
+
+# Basic ANSI rainbow palette
+colors = [
+    "\033[31m",  # Red
+    "\033[33m",  # Yellow
+    "\033[32m",  # Green
+    "\033[36m",  # Cyan
+    "\033[34m",  # Blue
+    "\033[35m",  # Magenta
+]
+
+reset = "\033[0m"
+
+def rainbow_text(text):
+    result = []
+    color_index = 0
+    for char in text:
+        if char != " " and char != "\n":
+            result.append(colors[color_index % len(colors)] + char)
+            color_index += 1
+        else:
+            result.append(char)
+    result.append(reset)
+    return "".join(result)
+
+print(rainbow_text(ascii_art))
 
 # ANSI colors (works on most *nix terminals and modern Windows terminals)
 RESET = "\033[0m"
@@ -678,6 +713,5 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 
 
