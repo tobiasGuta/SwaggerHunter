@@ -32,6 +32,18 @@ It also supports **conservative probing** of endpoints with optional JWT tokens,
 
 -   Rapid endpoint discovery for bug hunting
 
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+# Interactive Mode (TUI):
+
+```bash
+python3 swaggerhunter.py
+```
+
 ## Screenshot
 
 ```bash
