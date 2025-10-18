@@ -21,41 +21,14 @@ try:
     RICH_AVAILABLE = True
 except ImportError:
     RICH_AVAILABLE = False
-    
-ascii_art = r"""
-███████╗██╗    ██╗ █████╗  ██████╗  ██████╗ ███████╗██████╗     ██╗  ██╗██╗   ██╗███╗   ██╗████████╗███████╗██████╗ 
-██╔════╝██║    ██║██╔══██╗██╔════╝ ██╔════╝ ██╔════╝██╔══██╗    ██║  ██║██║   ██║████╗  ██║╚══██╔══╝██╔════╝██╔══██╗
-███████╗██║ █╗ ██║███████║██║  ███╗██║  ███╗█████╗  ██████╔╝    ███████║██║   ██║██╔██╗ ██║   ██║   █████╗  ██████╔╝
-╚════██║██║███╗██║██╔══██║██║   ██║██║   ██║██╔══╝  ██╔══██╗    ██╔══██║██║   ██║██║╚██╗██║   ██║   ██╔══╝  ██╔══██╗
-███████║╚███╔███╔╝██║  ██║╚██████╔╝╚██████╔╝███████╗██║  ██║    ██║  ██║╚██████╔╝██║ ╚████║   ██║   ███████╗██║  ██║
-╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚══════╝╚═╝  ╚═╝    ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
-"""
-
-# Basic ANSI rainbow palette
-colors = [
-    "\033[31m",  # Red
-    "\033[33m",  # Yellow
-    "\033[32m",  # Green
-    "\033[36m",  # Cyan
-    "\033[34m",  # Blue
-    "\033[35m",  # Magenta
-]
-
-reset = "\033[0m"
-
-def rainbow_text(text):
-    result = []
-    color_index = 0
-    for char in text:
-        if char != " " and char != "\n":
-            result.append(colors[color_index % len(colors)] + char)
-            color_index += 1
-        else:
-            result.append(char)
-    result.append(reset)
-    return "".join(result)
-
-print(rainbow_text(ascii_art))
+try:
+    from textual.app import App, ComposeResult
+    from textual.widgets import Header, Footer, Button, Static, Input, DataTable, Select
+    from textual.containers import Vertical, Horizontal
+    from textual.reactive import reactive
+    TEXTUAL_AVAILABLE = True
+except Exception:
+    TEXTUAL_AVAILABLE = False
 
 # ANSI colors (works on most *nix terminals and modern Windows terminals)
 RESET = "\033[0m"
@@ -85,13 +58,56 @@ INTERESTING_KEYWORDS = [
 ]
 
 def fetch_swagger(url: str, timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any]:
+    # Support file:// and HTTP(S) sources. Try JSON first, then YAML.
     if url.startswith("file://"):
         path = url[len("file://"):]
         with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            data = f.read()
+        try:
+            return json.loads(data)
+        except Exception:
+            try:
+                import yaml
+                return yaml.safe_load(data)
+            except Exception as e:
+                raise ValueError(f"Failed to parse file as JSON or YAML: {e}")
     r = requests.get(url, timeout=timeout)
     r.raise_for_status()
-    return r.json()
+    text = r.text
+
+    try:
+        return r.json()
+    except Exception as je:
+        ct = r.headers.get('Content-Type', '')
+        if 'html' in ct.lower() or text.lstrip().startswith('<'):
+            patterns = [r"fetch\(['\"](?P<u>[^'\"]+swagger[^'\"]+)['\"]", r"url\s*[:=]\s*['\"](?P<u>[^'\"]+openapi[^'\"]+)['\"]", r"['\"](?P<u>[^'\"]+openapi[^'\"]+\.json)['\"]", r"window\.__REDOC_SPEC__\s*=\s*['\"](?P<u>[^'\"]+)['\"]"]
+            for pat in patterns:
+                m = re.search(pat, text, re.IGNORECASE)
+                if m:
+                    spec_url = m.group('u')
+                    spec_url = urljoin(url, spec_url)
+                    try:
+                        r2 = requests.get(spec_url, timeout=timeout)
+                        r2.raise_for_status()
+                        try:
+                            return r2.json()
+                        except Exception:
+                            try:
+                                import yaml
+                                return yaml.safe_load(r2.text)
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
+            snippet = (text or '')[:800]
+            raise ValueError(f"Failed to parse response as JSON ({je}). Received HTML page; attempted to locate embedded spec URL but none identified. Content-Type: {ct}. Snippet: {snippet}. Common spec endpoints to try: /openapi.json, /swagger.json, /v2/api-docs")
+
+        try:
+            import yaml
+            return yaml.safe_load(text)
+        except Exception as ye:
+            snippet = (text or '')[:800]
+            raise ValueError(f"Failed to parse response as JSON ({je}) or YAML ({ye}). Content-Type: {ct}. Snippet: {snippet}")
 
 def guess_base_url(swagger: Dict[str, Any], swagger_url: str) -> str:
     if 'servers' in swagger and isinstance(swagger['servers'], list) and swagger['servers']:
@@ -423,181 +439,124 @@ def pretty_print_verbose(report: Dict[str, Any], limit: int = 50) -> None:
         print("")  # blank line between entries
 
 def interactive_tui():
-    if not RICH_AVAILABLE:
-        print(f"{RED}[!] Interactive mode requires 'rich' library.{RESET}")
-        print(f"    Install it with: pip install rich")
+    if not TEXTUAL_AVAILABLE:
+        if RICH_AVAILABLE:
+            console = Console()
+            console.print(f"{RED}[!] Interactive mode requires 'textual' library.{RESET}")
+            console.print("    Install it with: pip install textual")
+        else:
+            print("[!] Interactive mode requires 'textual' and 'rich' libraries. Install them with: pip install textual rich")
         sys.exit(1)
-    
-    console = Console()
-    
-    console.print(Panel.fit(
-        "[bold cyan]SwaggerHunter[/bold cyan] [yellow]v2.2[/yellow]\n"
-        "[dim]Interactive Mode - Swagger/OpenAPI Analysis Tool[/dim]",
-        border_style="cyan"
-    ))
-    
-    swagger_url = Prompt.ask("\n[bold green]?[/bold green] Enter Swagger/OpenAPI URL (or file:/// path)")
-    if not swagger_url:
-        console.print("[red]✗[/red] URL is required!")
-        sys.exit(1)
-    
-    console.print(f"\n[cyan]→[/cyan] Fetching specification from: [yellow]{swagger_url}[/yellow]")
-    try:
-        swagger = fetch_swagger(swagger_url, timeout=DEFAULT_TIMEOUT)
-    except Exception as e:
-        console.print(f"[red]✗ Failed to fetch swagger JSON:[/red] {e}")
-        sys.exit(2)
-    
-    version = swagger.get('openapi') or swagger.get('swagger', '')
-    base = guess_base_url(swagger, swagger_url)
-    console.print(f"[cyan]→[/cyan] Detected version: [yellow]{version}[/yellow]")
-    console.print(f"[cyan]→[/cyan] Base URL: [yellow]{base}[/yellow]")
-    
-    try:
-        swagger_resolved = preprocess_swagger(swagger)
-    except Exception as e:
-        console.print(f"[yellow]⚠ Warning: error while resolving $ref: {e}[/yellow]")
-        swagger_resolved = swagger
-    
-    report = enumerate_swagger(swagger_resolved, base, version)
-    console.print(f"\n[green]✓[/green] Found [bold]{len(report['endpoints'])}[/bold] endpoints\n")
-    
-    # keep the interactive menu looping until the user chooses Exit (6)
-    while True:
-        table = Table(title="Endpoints Preview", box=box.ROUNDED, show_lines=False)
-        table.add_column("#", style="dim", width=4)
-        table.add_column("Method", style="bold")
-        table.add_column("Path", style="cyan")
-        table.add_column("Summary", style="dim", overflow="fold")
-        
-        for i, ep in enumerate(report['endpoints'][:10], 1):
-            method_color = {
-                'GET': 'green', 'POST': 'yellow', 'PUT': 'cyan',
-                'PATCH': 'magenta', 'DELETE': 'red'
-            }.get(ep['method'], 'white')
-            
-            table.add_row(
-                str(i),
-                f"[{method_color}]{ep['method']}[/{method_color}]",
-                ep['path_template'],
-                (ep.get('summary') or '')[:50]
-            )
-        
-        if len(report['endpoints']) > 10:
-            table.add_row("...", "...", f"... and {len(report['endpoints']) - 10} more", "...")
-        
-        console.print(table)
-        
-        console.print("\n[bold]Actions:[/bold]")
-        console.print("  [cyan]1.[/cyan] Probe endpoints")
-        console.print("  [cyan]2.[/cyan] Export to JSON")
-        console.print("  [cyan]3.[/cyan] Export to Postman")
-        console.print("  [cyan]4.[/cyan] Export to Burp XML")
-        console.print("  [cyan]5.[/cyan] Show verbose output")
-        console.print("  [cyan]6.[/cyan] Exit")
-        
-        choice = Prompt.ask("\n[bold green]?[/bold green] Select action", choices=["1", "2", "3", "4", "5", "6"], default="6")
-        
-        # ---------- Option 1: Probe ----------
-        if choice == "1":
-            token = Prompt.ask("\n[bold green]?[/bold green] JWT Bearer token (optional, press Enter to skip)", default="")
-            method_filter = Prompt.ask("[bold green]?[/bold green] Filter methods (e.g., GET,POST or press Enter for all)", default="")
-            limit = Prompt.ask("[bold green]?[/bold green] Limit number of endpoints (0 = all)", default="0")
-            concurrency = Prompt.ask("[bold green]?[/bold green] Concurrency (threads)", default="5")
-            
-            endpoints_filtered = report['endpoints']
-            if method_filter:
-                allowed_methods = [m.strip().upper() for m in method_filter.split(',')]
-                endpoints_filtered = [ep for ep in endpoints_filtered if ep.get('method', '').upper() in allowed_methods]
-                console.print(f"[cyan]→[/cyan] Filtered to {len(endpoints_filtered)} endpoints")
-            
-            if int(limit) > 0:
-                endpoints_filtered = endpoints_filtered[:int(limit)]
-            
-            console.print(f"\n[yellow]→[/yellow] Probing {len(endpoints_filtered)} endpoints...\n")
-            
-            probe_results = []
-            with ThreadPoolExecutor(max_workers=int(concurrency)) as ex:
-                futures = {ex.submit(conservative_probe, ep, DEFAULT_TIMEOUT, 0.1, token if token else None): ep for ep in endpoints_filtered}
-                for fut in as_completed(futures):
-                    ep = futures[fut]
-                    try:
-                        r = fut.result()
-                    except Exception as e:
-                        r = {'url': ep.get('url_example'), 'method': ep.get('method'), 'error': str(e)}
-                    probe_results.append({'endpoint': ep, 'result': r})
-                    
-                    status = r.get('status')
-                    url = r.get('url') or ep.get('url_example')
-                    meth = r.get('method') or ep.get('method')
-                    
-                    if status is None:
-                        console.print(f"[red]✗ {meth} {url} -> error: {r.get('error')}[/red]")
-                    elif 200 <= status < 300:
-                        console.print(f"[green]✓ [{status}] {meth} {url}[/green]")
-                    elif 300 <= status < 400:
-                        console.print(f"[yellow]→ [{status}] {meth} {url}[/yellow]")
-                    else:
-                        console.print(f"[red]✗ [{status}] {meth} {url}[/red]")
-            
-            ok = sum(1 for p in probe_results if p['result'].get('status') and 200 <= p['result']['status'] < 300)
-            redirects = sum(1 for p in probe_results if p['result'].get('status') and 300 <= p['result']['status'] < 400)
-            client_err = sum(1 for p in probe_results if p['result'].get('status') and 400 <= p['result']['status'] < 500)
-            server_err = sum(1 for p in probe_results if p['result'].get('status') and 500 <= p['result']['status'] < 600)
-            
-            console.print(f"\n[bold]Probe Summary:[/bold] [green]{ok} OK[/green], [yellow]{redirects} redirects[/yellow], [red]{client_err} client errors[/red], [red]{server_err} server errors[/red]")
-            
-            if Confirm.ask("\n[bold green]?[/bold green] Save probe results to JSON?"):
-                filename = Prompt.ask("Filename", default="probe_results.json")
-                with open(filename, 'w', encoding='utf-8') as f:
-                    json.dump({'endpoints': endpoints_filtered, 'probe_results': probe_results}, f, indent=2)
-                console.print(f"[green]✓[/green] Saved to [cyan]{filename}[/cyan]")
-            
-            # loop back to menu
-            continue
-        
-        # ---------- Option 2: Export JSON ----------
-        elif choice == "2":
-            filename = Prompt.ask("\n[bold green]?[/bold green] JSON output filename", default="endpoints.json")
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(report, f, indent=2)
-            console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
-            continue
-        
-        # ---------- Option 3: Export Postman ----------
-        elif choice == "3":
-            filename = Prompt.ask("\n[bold green]?[/bold green] Postman collection filename", default="collection.json")
-            token = Prompt.ask("[bold green]?[/bold green] JWT Bearer token (optional)", default="")
-            export_postman(report, filename, token=token if token else None)
-            console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
-            continue
-        
-        # ---------- Option 4: Export Burp ----------
-        elif choice == "4":
-            filename = Prompt.ask("\n[bold green]?[/bold green] Burp XML filename", default="burp_sitemap.xml")
-            export_burp_xml(report, filename)
-            console.print(f"[green]✓[/green] Exported to [cyan]{filename}[/cyan]")
-            continue
-        
-        # ---------- Option 5: Verbose output ----------
-        elif choice == "5":
-            console.print("\n[bold cyan]Verbose Endpoint Details:[/bold cyan]\n")
-            for i, e in enumerate(report['endpoints'][:50], 1):
-                console.print(f"[bold]{i:03d}. [{e['method']}] {e['path_template']}[/bold]")
-                if e.get('summary'):
-                    console.print(f"  [blue]summary:[/blue] {clean_html(e['summary'])}")
-                if e.get('description'):
-                    console.print(f"  [cyan]description:[/cyan] {clean_html(e['description'])[:200]}")
-                if e.get('tags'):
-                    console.print(f"  [yellow]tags:[/yellow] {', '.join(e['tags'])}")
-                console.print()
-            # after showing verbose output, loop back to menu
-            continue
-        
-        # ---------- Option 6: Exit ----------
-        elif choice == "6":
-            console.print("\n[dim]Goodbye![/dim]")
-            return
+
+    class SwaggerHunter(App):
+        CSS = """
+        Screen { align: center middle; }
+        #menu { width: 80%; height: 60%; border: round green; }
+        """
+        report = reactive(None)
+        swagger_url = reactive("")
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            with Vertical(id="menu"):
+                yield Static("SwaggerHunter v2.2 - Textual TUI", id="title")
+                yield Input(placeholder="Enter Swagger/OpenAPI URL or file:///path", id="url_input")
+                with Horizontal():
+                    yield Button("Fetch", id="fetch")
+                    yield Button("Show Endpoints", id="show_endpoints")
+                    yield Button("Probe", id="probe")
+                    yield Button("Export JSON", id="export_json")
+                    yield Button("Export Postman", id="export_postman")
+                    yield Button("Export Burp XML", id="export_burp")
+                    yield Button("Exit", id="exit")
+                yield DataTable(id="table")
+                yield Static("Status: idle", id="status")
+            yield Footer()
+
+        def on_button_pressed(self, event):
+            btn_id = event.button.id
+            url_widget = self.query_one('#url_input', Input)
+            status = self.query_one('#status', Static)
+            table = self.query_one('#table', DataTable)
+
+            if btn_id == 'fetch':
+                self.swagger_url = url_widget.value.strip()
+                if not self.swagger_url:
+                    status.update("Status: enter a URL")
+                    return
+                status.update(f"Status: fetching {self.swagger_url}...")
+                try:
+                    swagger = fetch_swagger(self.swagger_url, timeout=DEFAULT_TIMEOUT)
+                except Exception as e:
+                    status.update(f"Status: fetch failed: {e}")
+                    return
+                version = swagger.get('openapi') or swagger.get('swagger', '')
+                base = guess_base_url(swagger, self.swagger_url)
+                try:
+                    swagger_resolved = preprocess_swagger(swagger)
+                except Exception:
+                    swagger_resolved = swagger
+                self.report = enumerate_swagger(swagger_resolved, base, version)
+                status.update(f"Status: fetched {len(self.report['endpoints'])} endpoints")
+
+            elif btn_id == 'show_endpoints':
+                if not self.report:
+                    status.update("Status: no report, fetch first")
+                    return
+                table.clear()
+                table.add_columns("#","Method","Path","Summary")
+                for i, ep in enumerate(self.report['endpoints'][:200], 1):
+                    table.add_row(str(i), ep['method'], ep['path_template'], (ep.get('summary') or '')[:60])
+                status.update(f"Status: showing {min(200, len(self.report['endpoints']))} endpoints")
+
+            elif btn_id == 'probe':
+                if not self.report:
+                    status.update("Status: no report, fetch first")
+                    return
+                status.update("Status: probing (conservative)...")
+                endpoints = self.report['endpoints'][:50]
+                results = []
+                with ThreadPoolExecutor(max_workers=5) as ex:
+                    futures = {ex.submit(conservative_probe, ep, DEFAULT_TIMEOUT, 0.1, None): ep for ep in endpoints}
+                    for fut in as_completed(futures):
+                        ep = futures[fut]
+                        try:
+                            r = fut.result()
+                        except Exception as e:
+                            r = {'url': ep.get('url_example'), 'method': ep.get('method'), 'error': str(e)}
+                        results.append((ep, r))
+                ok = sum(1 for _, r in results if r.get('status') and 200 <= r['status'] < 300)
+                status.update(f"Status: probe done: {ok}/{len(results)} OK")
+
+            elif btn_id == 'export_json':
+                if not self.report:
+                    status.update("Status: no report to export")
+                    return
+                fname = 'endpoints.json'
+                with open(fname, 'w', encoding='utf-8') as f:
+                    json.dump(self.report, f, indent=2)
+                status.update(f"Status: written {fname}")
+
+            elif btn_id == 'export_postman':
+                if not self.report:
+                    status.update("Status: no report to export")
+                    return
+                fname = 'collection.json'
+                export_postman(self.report, fname)
+                status.update(f"Status: written {fname}")
+
+            elif btn_id == 'export_burp':
+                if not self.report:
+                    status.update("Status: no report to export")
+                    return
+                fname = 'burp_sitemap.xml'
+                export_burp_xml(self.report, fname)
+                status.update(f"Status: written {fname}")
+
+            elif btn_id == 'exit':
+                self.exit()
+
+    SwaggerHunter().run()
 
 def main():
     if len(sys.argv) == 1:
@@ -725,5 +684,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
