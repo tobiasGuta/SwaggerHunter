@@ -9,10 +9,12 @@ import re
 import random
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlencode
 from typing import Dict, Any, List, Optional, Set
+import queue
 
 import requests
+import html as html_lib
 
 try:
     import yaml
@@ -122,9 +124,14 @@ METHOD_COLORS = {
 
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
+# GraphQL introspection query (compact)
+INTROSPECTION_QUERY = {
+    "query": "query IntrospectionQuery { __schema { queryType { name } mutationType { name } subscriptionType { name } types { name kind fields { name } } } }"
+}
+
 # Fetch
 
-def fetch_swagger(url: str, timeout: float = DEFAULT_TIMEOUT, proxies: Optional[Dict] = None) -> Dict[str, Any]:
+def fetch_swagger(url: str, timeout: float = DEFAULT_TIMEOUT, proxies: Optional[Dict] = None, verify: bool = True) -> Dict[str, Any]:
     if url.startswith("file://"):
         path = url[len("file://"):]
         with open(path, "r", encoding="utf-8") as fh:
@@ -135,7 +142,9 @@ def fetch_swagger(url: str, timeout: float = DEFAULT_TIMEOUT, proxies: Optional[
             return yaml.safe_load(raw)
         return json.loads(raw)
     
-    r = requests.get(url, timeout=timeout, proxies=proxies, verify=False)
+    if not verify:
+        print(f"{YELLOW}[!] Warning: SSL verification is disabled for fetching the specification.{RESET}")
+    r = requests.get(url, timeout=timeout, proxies=proxies, verify=verify)
     r.raise_for_status()
     ct = r.headers.get("content-type", "")
     if "yaml" in ct or url.rstrip("/").endswith((".yaml", ".yml")):
@@ -283,9 +292,27 @@ def build_example_path(path_template: str, parameters: List[Dict]) -> str:
     path = path_template
     for p in parameters or []:
         if p.get("in") == "path":
-            name   = p.get("name")
+            name = p.get("name")
             schema = p.get("schema") or (p.get("type") and {"type": p.get("type")})
-            path   = path.replace("{" + name + "}", str(choose_dummy_from_schema(schema)))
+            path = path.replace("{" + name + "}", str(choose_dummy_from_schema(schema)))
+
+    # Append example query parameters (useful for required query params)
+    query_items: List[tuple] = []
+    for p in parameters or []:
+        if p.get("in") == "query":
+            qname = p.get("name")
+            qschema = p.get("schema") or (p.get("type") and {"type": p.get("type")})
+            qval = choose_dummy_from_schema(qschema)
+            if isinstance(qval, bool):
+                qval = str(qval).lower()
+            elif isinstance(qval, (list, tuple)):
+                qval = ",".join(map(str, qval))
+            else:
+                qval = str(qval)
+            query_items.append((qname, qval))
+
+    if query_items:
+        return path + "?" + urlencode(query_items, doseq=True)
     return path
 
 def collect_parameters(operation: Dict, path_params: List[Dict]) -> List[Dict]:
@@ -305,35 +332,141 @@ def tag_endpoint(path: str, method: str, summary: Optional[str]) -> List[str]:
 
 def enumerate_swagger(swagger: Dict[str, Any], base_url: str, swagger_version: str) -> Dict[str, Any]:
     output: Dict[str, Any] = {"base": base_url, "endpoints": []}
-    for path_template, path_item in swagger.get("paths", {}).items():
+
+    # Combine regular paths and OpenAPI 3.1 webhooks (callbacks)
+    combined = {}
+    combined.update(swagger.get("paths", {}) or {})
+    combined.update(swagger.get("webhooks", {}) or {})
+
+    for path_template, path_item in combined.items():
         if not isinstance(path_item, dict):
             continue
         path_level_params = path_item.get("parameters", [])
         for method in ("get", "post", "put", "delete", "patch", "head", "options"):
             if method not in path_item:
                 continue
-            op       = path_item[method] or {}
-            params   = collect_parameters(op, path_level_params)
-            ex_path  = build_example_path(path_template, params)
+            op = path_item[method] or {}
+            params = collect_parameters(op, path_level_params)
+            ex_path = build_example_path(path_template, params)
             full_url = urljoin(base_url.rstrip("/") + "/", ex_path.lstrip("/"))
-            summary  = op.get("summary") or op.get("description")
+            summary = op.get("summary") or op.get("description")
             output["endpoints"].append({
                 "path_template": path_template,
-                "method":        method.upper(),
-                "summary":       summary,
-                "description":   op.get("description", ""),
-                "parameters":    params,
-                "url_example":   full_url,
-                "tags":          tag_endpoint(path_template, method, summary),
-                "security":      op.get("security"),
-                "responses":     op.get("responses", {}),
+                "method": method.upper(),
+                "summary": summary,
+                "description": op.get("description", ""),
+                "parameters": params,
+                "url_example": full_url,
+                "tags": tag_endpoint(path_template, method, summary),
+                "security": op.get("security"),
+                "responses": op.get("responses", {}),
             })
+
     return output
 
 # Probing
 
 def _scan_response_body(text: str) -> List[str]:
     return [pat for pat in SENSITIVE_RESPONSE_PATTERNS if re.search(pat, text, re.IGNORECASE)]
+
+
+def _compare_responses(auth_text: str, unauth_text: str) -> Dict[str, Any]:
+    """Compare two response bodies and produce heuristic metrics.
+
+    Returns a dict with keys: len_a, len_b, len_diff, ratio, both_json, json_key_overlap, similar(bool)
+    """
+    a = auth_text or ""
+    b = unauth_text or ""
+    la = len(a)
+    lb = len(b)
+    len_diff = abs(la - lb)
+    # normalize against the larger response to avoid small-minor-length skew
+    ratio = len_diff / max(1, max(la, lb)) if max(la, lb) > 0 else 0.0
+    info: Dict[str, Any] = {"len_a": la, "len_b": lb, "len_diff": len_diff, "ratio": ratio, "both_json": False, "json_key_overlap": 0.0}
+    try:
+        ja = json.loads(a)
+        jb = json.loads(b)
+        info["both_json"] = True
+        # For JSON objects, compare key sets at top level where applicable
+        if isinstance(ja, dict) and isinstance(jb, dict):
+            ka = set(ja.keys())
+            kb = set(jb.keys())
+            if ka or kb:
+                overlap = len(ka & kb) / max(1, len(ka | kb))
+                info["json_key_overlap"] = overlap
+                info["similar"] = overlap >= 0.6 or ratio <= 0.15
+                return info
+        # For arrays or other JSON, fallback to length-based
+        info["similar"] = ratio <= 0.15
+        return info
+    except Exception:
+        # not JSON — use length heuristic
+        info["similar"] = ratio <= 0.15
+        return info
+
+
+def tune_delay_for_rate_limit(sample_url: str, proxies: Optional[Dict] = None, verify: bool = True, console: Optional[object] = None) -> float:
+    """Probe headers to suggest a safe delay (seconds) to avoid rate limits.
+
+    Returns suggested minimum delay (float)."""
+    # Announce the fingerprinting request so operators are aware
+    msg = f"[*] Rate-limit fingerprint: HEAD {sample_url}"
+    if console:
+        try:
+            console.print(msg)
+        except Exception:
+            print(msg)
+    else:
+        print(msg)
+    try:
+        r = requests.head(sample_url, timeout=DEFAULT_TIMEOUT, allow_redirects=True, proxies=proxies, verify=verify)
+        hdr = {k.lower(): v for k, v in r.headers.items()}
+    except Exception:
+        return 0.0
+
+    delay = 0.0
+    if "retry-after" in hdr:
+        try:
+            val = int(hdr["retry-after"]) if hdr["retry-after"].isdigit() else 0
+            if val > 0:
+                delay = max(delay, val / 2.0)
+        except Exception:
+            pass
+
+    # Look for common rate-limit headers
+    limit = hdr.get("x-ratelimit-limit")
+    remaining = hdr.get("x-ratelimit-remaining")
+    reset = hdr.get("x-ratelimit-reset")
+    if limit and remaining:
+        try:
+            lim = float(limit)
+            rem = float(remaining)
+            if reset:
+                # reset may be epoch seconds or seconds-until-reset
+                rsec = float(reset)
+                now = time.time()
+                if rsec > now + 1000:  # epoch form
+                    secs = max(1.0, rsec - now)
+                else:
+                    secs = max(1.0, rsec)
+                # spread remaining over seconds to get per-request cadence
+                # use the smaller of remaining and configured limit to be conservative
+                per_req = secs / max(1.0, min(rem, lim))
+                delay = max(delay, per_req)
+            else:
+                # fallback conservative delay
+                delay = max(delay, 1.0)
+        except Exception:
+            pass
+
+    # If headers indicate small remaining, be conservative
+    try:
+        if remaining and float(remaining) < 5:
+            delay = max(delay, 1.0)
+    except Exception:
+        pass
+
+    return delay
 
 def conservative_probe(
     endpoint: Dict[str, Any],
@@ -344,6 +477,7 @@ def conservative_probe(
     extra_headers: Optional[Dict[str, str]] = None,
     safe_mode: bool = False,
     test_unauth: bool = False,
+    verify: bool = True,
 ) -> Dict[str, Any]:
     
     url, method = endpoint["url_example"], endpoint["method"]
@@ -374,7 +508,7 @@ def conservative_probe(
         try:
             if method in ("GET", "HEAD", "OPTIONS"):
                 r = requests.request(method, url, headers=hdrs, timeout=timeout,
-                                     allow_redirects=True, proxies=proxies, verify=False)
+                                     allow_redirects=True, proxies=proxies, verify=verify)
             else:
                 body: Dict = {}
                 for p in endpoint.get("parameters", []):
@@ -383,7 +517,7 @@ def conservative_probe(
                         body[p.get("name", "body")] = choose_dummy_from_schema(schema)
                 r = requests.request(method, url, headers=hdrs, json=body or None,
                                      timeout=timeout, allow_redirects=False,
-                                     proxies=proxies, verify=False)
+                                     proxies=proxies, verify=verify)
             
             if r.status_code == 429 and attempt < MAX_PROBE_RETRIES:
                 retry_hdr = r.headers.get("Retry-After")
@@ -400,13 +534,41 @@ def conservative_probe(
             res["snippet"]        = snippet
             res["sensitive_hits"] = _scan_response_body(snippet)
             
-            # Unauthenticated Bypass Check
-            if token and test_unauth and r.status_code < 400:
-                hdrs_no_auth = {k: v for k, v in hdrs.items() if k.lower() != "authorization"}
-                r_no = requests.request(method, url, headers=hdrs_no_auth, timeout=timeout, 
-                                        allow_redirects=False, proxies=proxies, verify=False)
-                if 200 <= r_no.status_code < 300:
-                    res["unauth_vuln"] = True
+            # Unauthenticated Bypass Check (improved): compare authenticated vs unauthenticated responses
+            if token and test_unauth:
+                try:
+                    hdrs_no_auth = {k: v for k, v in hdrs.items() if k.lower() != "authorization"}
+                    r_no = requests.request(method, url, headers=hdrs_no_auth, timeout=timeout,
+                                            allow_redirects=False, proxies=proxies, verify=verify)
+                    unauth_snip = (r_no.text or "")[:800]
+                    res["unauth_status"] = r_no.status_code
+                    res["unauth_snippet"] = unauth_snip
+                    # If unauth returns 2xx while auth was error, that's a clear bypass
+                    if 200 <= r_no.status_code < 300 and not (200 <= r.status_code < 300):
+                        res["unauth_vuln"] = True
+                    else:
+                        cmp = _compare_responses(snippet, unauth_snip)
+                        res["unauth_diff"] = cmp
+                        # If both succeeded and bodies are similar, mark as vuln
+                        if (200 <= r.status_code < 400) and (200 <= r_no.status_code < 400) and cmp.get("similar"):
+                            res["unauth_vuln"] = True
+                except Exception:
+                    # ignore failures in unauth check but record error
+                    res["unauth_error"] = True
+
+            # GraphQL introspection probe for endpoints that look like GraphQL
+            try:
+                if "graphql" in (endpoint.get("path_template", "") or "").lower() or "graphql" in url.lower():
+                    gql_hdrs = dict(hdrs)
+                    gql_hdrs["Content-Type"] = "application/json"
+                    r_gql = requests.post(url, headers=gql_hdrs, json=INTROSPECTION_QUERY, timeout=timeout,
+                                          allow_redirects=False, proxies=proxies, verify=verify)
+                    res["graphql_introspection"] = {
+                        "status": r_gql.status_code,
+                        "snippet": (r_gql.text or "")[:800]
+                    }
+            except Exception:
+                pass
 
             break
         except Exception as exc:
@@ -475,6 +637,74 @@ def export_postman(report: Dict[str, Any], filename: str,
         json.dump(collection, fh, indent=2)
 
 
+def export_html(report: Dict[str, Any], filename: str) -> None:
+    """Write a self-contained HTML report with endpoints and probe results."""
+    endpoints = report.get("endpoints", [])
+    probe_results = report.get("probe_results", [])
+    # Simple HTML with inline CSS/JS
+    rows = []
+    # Build a quick lookup by (url_example, method) to match probe results robustly
+    pr_lookup: Dict[tuple, Dict[str, Any]] = {}
+    for p in probe_results:
+        ep = p.get("endpoint")
+        if not ep:
+            continue
+        key = (ep.get("url_example"), ep.get("method"))
+        pr_lookup[key] = p
+
+    for i, ep in enumerate(endpoints, 1):
+        key = (ep.get("url_example"), ep.get("method"))
+        pr = pr_lookup.get(key)
+        pr_json = html_lib.escape(json.dumps(pr or {}, indent=2))
+        rows.append(f"<tr><td>{i}</td><td>{ep.get('method')}</td><td>{html_lib.escape(ep.get('path_template',''))}</td>"
+                    f"<td>{html_lib.escape(ep.get('summary') or '')}</td>"
+                    f"<td><button onclick=\"toggle('r{i}')\">View</button>"
+                    f"<pre id=\"r{i}\" style=\"display:none;white-space:pre-wrap;max-height:300px;overflow:auto\">{pr_json}</pre></td></tr>")
+
+    html_doc = f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>SwaggerHunter Report</title>
+<style>table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:6px}}button{{padding:4px}}</style>
+<script>function toggle(id){{var e=document.getElementById(id);e.style.display=(e.style.display==='none')?'block':'none';}}</script>
+</head><body>
+<h1>SwaggerHunter Report</h1>
+<table><thead><tr><th>#</th><th>Method</th><th>Path</th><th>Summary</th><th>Probe</th></tr></thead><tbody>
+{''.join(rows)}
+</tbody></table>
+</body></html>"""
+    with open(filename, "w", encoding="utf-8") as fh:
+        fh.write(html_doc)
+
+
+def _sessions_path() -> str:
+    return os.path.join(os.getcwd(), ".swaggerhunter.json")
+
+
+def save_session(name: str, base: str, scope_indices: Set[int], token: Optional[str]) -> None:
+    path = _sessions_path()
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            data = {}
+    data[name] = {"base": base, "scope_indices": sorted(list(scope_indices)), "token": token}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+
+
+def load_session(name: str) -> Optional[Dict[str, Any]]:
+    path = _sessions_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data.get(name)
+    except Exception:
+        return None
+
+
 # CLI helpers
 def color_for_method(m: str) -> str:
     return {"GET": GREEN, "POST": YELLOW, "PATCH": CYAN,
@@ -496,6 +726,7 @@ def parse_extra_headers(raw: Optional[List[str]]) -> Dict[str, str]:
 
 def parse_range_selection(raw: str, max_idx: int) -> Set[int]:
     indices: Set[int] = set()
+    invalid_parts: List[str] = []
     for part in raw.split(","):
         part = part.strip()
         if "-" in part:
@@ -505,14 +736,17 @@ def parse_range_selection(raw: str, max_idx: int) -> Set[int]:
                     if 1 <= i <= max_idx:
                         indices.add(i)
             except ValueError:
-                pass
+                invalid_parts.append(part)
         else:
             try:
                 i = int(part)
                 if 1 <= i <= max_idx:
                     indices.add(i)
             except ValueError:
-                pass
+                if part:
+                    invalid_parts.append(part)
+    if invalid_parts:
+        print(f"[!] Ignored invalid selection parts: {', '.join(invalid_parts)}", file=sys.stderr)
     return indices
 
 def pretty_print_summary(report: Dict[str, Any], limit: int = 50) -> None:
@@ -580,15 +814,15 @@ def build_endpoint_table(
 
     shown = 0
     for abs_i, ep in enumerate(endpoints, start_idx):
-        if shown >= max_rows:
-            break
         if keyword:
             haystack = (ep["path_template"] + " " + (ep.get("summary") or "")).lower()
             if keyword.lower() not in haystack:
                 continue
-        in_scope   = (scope_indices is not None) and (abs_i in scope_indices)
+        if shown >= max_rows:
+            break
+        in_scope = (scope_indices is not None) and (abs_i in scope_indices)
         scope_mark = "[green]●[/green]" if in_scope else "[bright_black]○[/bright_black]"
-        row_vals   = [str(abs_i)]
+        row_vals = [str(abs_i)]
         if show_scope:
             row_vals.append(scope_mark)
         row_vals.extend([
@@ -726,10 +960,17 @@ def interactive_tui() -> None:
     )
     proxies = {"http": proxy_raw, "https": proxy_raw} if proxy_raw else None
 
+    # SSL verification prompt for interactive mode
+    disable_verify = Confirm.ask(
+        "[bold cyan]>[/bold cyan] Disable SSL verification? [dim](dangerous — skip cert checks)[/dim]",
+        default=False,
+    )
+    verify = not disable_verify
+
     console.print()
     with console.status("[cyan]Fetching specification…[/cyan]", spinner="dots"):
         try:
-            swagger = fetch_swagger(swagger_url, timeout=DEFAULT_TIMEOUT, proxies=proxies)
+            swagger = fetch_swagger(swagger_url, timeout=DEFAULT_TIMEOUT, proxies=proxies, verify=verify)
         except Exception as e:
             console.print(f"[red]✗ Failed to fetch:[/red] {e}")
             sys.exit(2)
@@ -747,6 +988,8 @@ def interactive_tui() -> None:
             info_lines.append(f"[bold]Auth    :[/bold]  [yellow]{h}[/yellow]")
     if proxy_raw:
         info_lines.append(f"[bold]Proxy   :[/bold]  [dim]{proxy_raw}[/dim]")
+    if not verify:
+        info_lines.append(f"[bold]SSL Verif:[/bold]  [red]Disabled (insecure)[/red]")
     
     if FAKER_AVAILABLE:
         info_lines.append("[bold]Faker   :[/bold]  [green]Active (Realistic Payloads)[/green]")
@@ -772,6 +1015,7 @@ def interactive_tui() -> None:
     scope_indices:  Set[int]   = set(range(1, total + 1)) 
     active_keyword: str        = ""
     probe_results:  List[Dict] = []
+    graphql_probe_enabled: bool = False
 
     while True:
         if active_keyword:
@@ -862,7 +1106,17 @@ def interactive_tui() -> None:
                 + (f" via [dim]{proxy_raw}[/dim]" if proxy_raw else "") + "\n"
             )
 
-            probe_results = []
+            # Auto-tune delay based on a sample request's rate-limit headers
+            suggested = 0.0
+            try:
+                suggested = tune_delay_for_rate_limit(eps_to_probe[0]["url_example"], proxies, verify, console)
+            except Exception:
+                suggested = 0.0
+            if suggested and suggested > delay:
+                console.print(f"[yellow]Rate-limit tune:[/yellow] increasing delay to {suggested:.2f}s")
+                delay = max(delay, suggested)
+
+            q_results: "queue.Queue" = queue.Queue()
             sensitive_eps: List[Dict] = []
             unauth_eps: List[Dict] = []
 
@@ -882,7 +1136,7 @@ def interactive_tui() -> None:
                     futures = {
                         ex.submit(
                             conservative_probe, ep, DEFAULT_TIMEOUT, delay,
-                            token or None, proxies, extra_hdrs or None, safe_mode, test_unauth
+                            token or None, proxies, extra_hdrs or None, safe_mode, test_unauth, verify
                         ): ep
                         for ep in eps_to_probe
                     }
@@ -894,7 +1148,7 @@ def interactive_tui() -> None:
                             except Exception as exc:
                                 r = {"url": ep.get("url_example"),
                                      "method": ep.get("method"), "error": str(exc), "skipped": False}
-                            probe_results.append({"endpoint": ep, "result": r})
+                            q_results.put({"endpoint": ep, "result": r})
 
                             status = r.get("status")
                             meth   = r.get("method") or ep.get("method")
@@ -919,6 +1173,12 @@ def interactive_tui() -> None:
                                 unauth_eps.append({"endpoint": ep, "result": r})
                     except KeyboardInterrupt:
                         console.print(f"\n[yellow] Interrupted.[/yellow]")
+
+            # Drain queue into a list in deterministic (completion) order
+            current_probe_results: List[Dict] = []
+            while not q_results.empty():
+                current_probe_results.append(q_results.get())
+            probe_results = current_probe_results
 
             console.print()
             console.print(build_probe_summary_panel(probe_results))
@@ -1026,6 +1286,22 @@ def interactive_tui() -> None:
             cmd = Prompt.ask("\n[bold cyan]>[/bold cyan] Command", default="").strip()
             if not cmd:
                 pass
+            elif cmd.lower().startswith("save "):
+                name = cmd.split(None, 1)[1].strip()
+                save_session(name, base, scope_indices, None)
+                console.print(f"[green]✓[/green] Saved scope '{name}' to .swaggerhunter.json")
+                continue
+            elif cmd.lower().startswith("load "):
+                name = cmd.split(None, 1)[1].strip()
+                sess = load_session(name)
+                if not sess:
+                    console.print(f"[yellow] No session named '{name}' found.[/yellow]")
+                else:
+                    if sess.get("base") and sess.get("base") != base:
+                        console.print(f"[yellow] Warning: session base differs from current base.[/yellow]")
+                    scope_indices = set(sess.get("scope_indices", []))
+                    console.print(f"[green]✓[/green] Loaded scope '{name}' ({len(scope_indices)} endpoints)")
+                continue
             elif cmd.lower() == "all":
                 scope_indices = set(range(1, total + 1))
                 console.print(f"[green]✓[/green] All {total} endpoints in scope.")
@@ -1099,6 +1375,10 @@ def main() -> None:
     parser.add_argument("--probe",       action="store_true")
     parser.add_argument("--safe-mode",   action="store_true", help="Skip destructive HTTP methods during probe")
     parser.add_argument("--test-unauth", action="store_true", help="Test for unauthenticated bypasses (if --token provided)")
+    parser.add_argument("--no-verify", action="store_true", help="Disable SSL certificate verification (insecure)")
+    parser.add_argument("--probe-graphql", action="store_true", help="Probe /graphql with introspection (opt-in)")
+    parser.add_argument("--save-scope", metavar="NAME", help="Save current scope to .swaggerhunter.json")
+    parser.add_argument("--load-scope", metavar="NAME", help="Load named scope from .swaggerhunter.json")
     parser.add_argument("-o", "--output")
     parser.add_argument("--timeout",     type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument("--limit",       type=int,   default=0)
@@ -1106,6 +1386,7 @@ def main() -> None:
     parser.add_argument("--delay",       type=float, default=0.1)
     parser.add_argument("--burp")
     parser.add_argument("--postman")
+    parser.add_argument("--html")
     parser.add_argument("--summary",     action="store_true")
     parser.add_argument("--verbose",     action="store_true")
     parser.add_argument("--show-all",    action="store_true")
@@ -1114,6 +1395,8 @@ def main() -> None:
     parser.add_argument("--proxy")
     parser.add_argument("--header", action="append", dest="headers", metavar="KEY:VALUE")
     args = parser.parse_args()
+
+    verify = not args.no_verify
 
     proxies       = {"http": args.proxy, "https": args.proxy} if args.proxy else None
     extra_headers = parse_extra_headers(args.headers)
@@ -1125,7 +1408,9 @@ def main() -> None:
 
     print(f"[*] Fetching specification from: {args.url}")
     try:
-        swagger = fetch_swagger(args.url, timeout=args.timeout, proxies=proxies)
+        if not verify:
+            print(f"{YELLOW}[!] Warning: SSL verification disabled via --no-verify (insecure).{RESET}")
+        swagger = fetch_swagger(args.url, timeout=args.timeout, proxies=proxies, verify=verify)
     except Exception as e:
         print(f"{RED}[!] Failed:{RESET} {e}")
         sys.exit(2)
@@ -1144,6 +1429,21 @@ def main() -> None:
         swagger_resolved = swagger
 
     report        = enumerate_swagger(swagger_resolved, base, version)
+    # Optionally add a synthetic /graphql candidate when explicitly requested
+    if args.probe_graphql:
+        if not any("graphql" in ep["path_template"].lower() for ep in report["endpoints"]):
+            gql_url = urljoin(base.rstrip("/") + "/", "graphql")
+            report["endpoints"].append({
+                "path_template": "/graphql",
+                "method": "POST",
+                "summary": "GraphQL endpoint (introspection candidate)",
+                "description": "User-requested candidate for GraphQL introspection",
+                "parameters": [],
+                "url_example": gql_url,
+                "tags": ["graphql"],
+                "security": None,
+                "responses": {},
+            })
     limit_display = 9999 if args.show_all else 50
 
     if args.verbose:
@@ -1159,6 +1459,26 @@ def main() -> None:
         print(f"[*] Method filter: {', '.join(allowed)}  ({len(report['endpoints'])} → {len(endpoints_filtered)})")
     if args.limit > 0:
         endpoints_filtered = endpoints_filtered[:args.limit]
+
+    # Load scope if requested (CLI)
+    if args.load_scope:
+        s = load_session(args.load_scope)
+        if not s:
+            print(f"{YELLOW}[!] No session named '{args.load_scope}' in .swaggerhunter.json{RESET}")
+        else:
+            if s.get("base") and s.get("base") != base:
+                print(f"{YELLOW}[!] Warning: session base URL differs from current base{RESET}")
+            scope_set = set(s.get("scope_indices", []))
+            endpoints_filtered = [ep for i, ep in enumerate(report["endpoints"], 1) if i in scope_set]
+            print(f"[*] Loaded scope '{args.load_scope}' -> {len(endpoints_filtered)} endpoints")
+
+    # Save scope if requested (CLI)
+    if args.save_scope:
+        # Build id-based lookup to avoid identity/value mismatch and O(n^2) checks
+        filtered_set = set(id(ep) for ep in endpoints_filtered)
+        scope_set = set(i for i, ep in enumerate(report["endpoints"], 1) if id(ep) in filtered_set)
+        save_session(args.save_scope, base, scope_set, args.token)
+        print(f"[*] Saved scope '{args.save_scope}' to .swaggerhunter.json")
 
     filtered_report = {"endpoints": endpoints_filtered}
 
@@ -1176,6 +1496,13 @@ def main() -> None:
         except Exception as e:
             print(f"{RED}[!] Postman failed: {e}{RESET}")
 
+    if args.html:
+        try:
+            export_html(filtered_report, args.html)
+            print(f"[*] HTML report → {args.html}")
+        except Exception as e:
+            print(f"{YELLOW}[!] HTML export failed: {e}{RESET}")
+
     if args.output:
         try:
             with open(args.output, "w", encoding="utf-8") as fh:
@@ -1188,12 +1515,23 @@ def main() -> None:
 
     if args.probe:
         print(f"[*] Probing endpoints (Safe Mode: {'ON' if args.safe_mode else 'OFF'}).")
-        probe_results: List[Dict] = []
+        # Auto-tune delay based on rate-limit headers from a sample
+        suggested = 0.0
+            try:
+                if endpoints_filtered:
+                    suggested = tune_delay_for_rate_limit(endpoints_filtered[0]["url_example"], proxies, verify, None)
+            except Exception:
+                suggested = 0.0
+        if suggested and suggested > args.delay:
+            print(f"[*] Rate-limit tune: increasing delay to {suggested:.2f}s")
+            args.delay = max(args.delay, suggested)
+
+        q_results: "queue.Queue" = queue.Queue()
         with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
             futures = {
                 ex.submit(
                     conservative_probe, ep, args.timeout, args.delay,
-                    args.token, proxies, extra_headers or None, args.safe_mode, args.test_unauth
+                    args.token, proxies, extra_headers or None, args.safe_mode, args.test_unauth, verify
                 ): ep
                 for ep in endpoints_filtered
             }
@@ -1205,7 +1543,7 @@ def main() -> None:
                     except Exception as exc:
                         r = {"url": ep.get("url_example"), "method": ep.get("method"),
                              "error": str(exc), "skipped": False}
-                    probe_results.append({"endpoint": ep, "result": r})
+                    q_results.put({"endpoint": ep, "result": r})
                     status  = r.get("status")
                     skipped = r.get("skipped")
                     url     = r.get("url") or ep.get("url_example")
@@ -1228,7 +1566,12 @@ def main() -> None:
                         vuln = f"  {RED} UNAUTH BYPASS{RESET}" if unauth else ""
                         print(f"{col}[{status}] {meth} {url}{RESET}{sens}{vuln}")
             except KeyboardInterrupt:
-                print(f"\n{YELLOW}[!] Interrupted.[/RESET]")
+                print(f"\n{YELLOW}[!] Interrupted.{RESET}")
+
+        # Drain queue into list
+        probe_results: List[Dict] = []
+        while not q_results.empty():
+            probe_results.append(q_results.get())
 
         ok         = sum(1 for p in probe_results if p["result"].get("status") and 200 <= p["result"]["status"] < 300)
         redirects  = sum(1 for p in probe_results if p["result"].get("status") and 300 <= p["result"]["status"] < 400)
