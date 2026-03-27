@@ -1,4 +1,4 @@
-**SwaggerHunter** — Swagger/OpenAPI enumerator, exporter and conservative endpoint probe.
+**SwaggerHunter** Swagger/OpenAPI enumerator, exporter and conservative endpoint probe.
 
 SwaggerHunter automatically parses Swagger/OpenAPI specs (JSON or YAML), resolves local $ref references, enumerates path templates, and can export or probe endpoints. It includes an interactive TUI (requires `rich`) and CLI with options for safe probing, unauthenticated bypass testing, and realistic payload generation via `Faker` when available.
 
