@@ -72,6 +72,14 @@ Interactive Mode (TUI)
 python3 swaggerhunter.py
 ```
 
+<img width="1385" height="332" alt="image" src="https://github.com/user-attachments/assets/cb54f5ba-d091-4a60-bf5a-a1578ed21504" />
+
+<img width="1912" height="983" alt="image" src="https://github.com/user-attachments/assets/0088a610-4ffd-4b5b-b8a2-bc39093eb859" />
+
+<img width="1909" height="682" alt="image" src="https://github.com/user-attachments/assets/9342bbdd-4f70-43ca-b8e0-9f92e9b5201e" />
+
+<img width="1868" height="362" alt="image" src="https://github.com/user-attachments/assets/211e01a6-9a01-43c4-94ff-2f26eff08c8f" />
+
 The TUI supports scope selection, keyword filtering, threaded probing, exports to Postman/Burp/JSON, and saving probe results.
 
 Next steps
