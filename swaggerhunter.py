@@ -1517,11 +1517,11 @@ def main() -> None:
         print(f"[*] Probing endpoints (Safe Mode: {'ON' if args.safe_mode else 'OFF'}).")
         # Auto-tune delay based on rate-limit headers from a sample
         suggested = 0.0
-            try:
-                if endpoints_filtered:
-                    suggested = tune_delay_for_rate_limit(endpoints_filtered[0]["url_example"], proxies, verify, None)
-            except Exception:
-                suggested = 0.0
+        try:
+            if endpoints_filtered:
+                suggested = tune_delay_for_rate_limit(endpoints_filtered[0]["url_example"], proxies, verify, None)
+        except Exception:
+            suggested = 0.0
         if suggested and suggested > args.delay:
             print(f"[*] Rate-limit tune: increasing delay to {suggested:.2f}s")
             args.delay = max(args.delay, suggested)
