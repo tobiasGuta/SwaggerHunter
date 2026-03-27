@@ -686,9 +686,9 @@ def build_probe_summary_panel(probe_results: List[Dict]) -> Panel:
     if errors:
         tbl.add_row("[dim]Connection errors[/dim]",     str(errors))
     if unauth:
-        tbl.add_row("[bold red]⚠  Unauth Bypass[/bold red]", str(unauth))
+        tbl.add_row("[bold red]  Unauth Bypass[/bold red]", str(unauth))
     if sens_count:
-        tbl.add_row("[bold red]⚠  Sensitive hits[/bold red]", str(sens_count))
+        tbl.add_row("[bold red]  Sensitive hits[/bold red]", str(sens_count))
 
     return Panel(
         tbl,
@@ -762,7 +762,7 @@ def interactive_tui() -> None:
         try:
             swagger_resolved = preprocess_swagger(swagger)
         except Exception as e:
-            console.print(f"[yellow]⚠ $ref warning: {e}[/yellow]")
+            console.print(f"[yellow] $ref warning: {e}[/yellow]")
             swagger_resolved = swagger
         report = enumerate_swagger(swagger_resolved, base, version)
 
@@ -854,7 +854,7 @@ def interactive_tui() -> None:
                 if i in scope_indices
             ]
             if not eps_to_probe:
-                console.print("[yellow]⚠ No in-scope endpoints.[/yellow]")
+                console.print("[yellow] No in-scope endpoints.[/yellow]")
                 continue
 
             console.print(
@@ -868,7 +868,7 @@ def interactive_tui() -> None:
 
             with Progress(
                 SpinnerColumn(style="cyan"),
-                TextColumn("[dim]{task.description}[/dim]", no_wrap=True),
+                TextColumn("[dim]{task.description}[/dim]"),
                 BarColumn(bar_width=38, style="bright_black", complete_style="cyan"),
                 MofNCompleteColumn(),
                 TaskProgressColumn(),
@@ -918,13 +918,13 @@ def interactive_tui() -> None:
                             if r.get("unauth_vuln"):
                                 unauth_eps.append({"endpoint": ep, "result": r})
                     except KeyboardInterrupt:
-                        console.print(f"\n[yellow]⚠ Interrupted.[/yellow]")
+                        console.print(f"\n[yellow] Interrupted.[/yellow]")
 
             console.print()
             console.print(build_probe_summary_panel(probe_results))
 
             if unauth_eps:
-                console.print("\n[bold red]⚠ Unauthenticated Access Vulnerabilities Detected:[/bold red]")
+                console.print("\n[bold red] Unauthenticated Access Vulnerabilities Detected:[/bold red]")
                 for item in unauth_eps:
                     ep  = item["endpoint"]
                     mc  = METHOD_COLORS.get(ep["method"], "white")
@@ -934,7 +934,7 @@ def interactive_tui() -> None:
                     )
 
             if sensitive_eps:
-                console.print("\n[bold red]⚠ Sensitive data patterns detected:[/bold red]")
+                console.print("\n[bold red] Sensitive data patterns detected:[/bold red]")
                 for item in sensitive_eps:
                     ep  = item["endpoint"]
                     res = item["result"]
@@ -1031,7 +1031,7 @@ def interactive_tui() -> None:
                 console.print(f"[green]✓[/green] All {total} endpoints in scope.")
             elif cmd.lower() == "none":
                 scope_indices = set()
-                console.print("[yellow]⚠ Scope cleared.[/yellow]")
+                console.print("[yellow] Scope cleared.[/yellow]")
             elif cmd.startswith("+"):
                 added = parse_range_selection(cmd[1:], total)
                 scope_indices |= added
@@ -1224,8 +1224,8 @@ def main() -> None:
                     if status is None:
                         print(f"{RED}[!] {meth} {url} → {r.get('error')}{RESET}")
                     else:
-                        sens = f"  {RED}⚠ {hits}{RESET}" if hits else ""
-                        vuln = f"  {RED}⚠ UNAUTH BYPASS{RESET}" if unauth else ""
+                        sens = f"  {RED} {hits}{RESET}" if hits else ""
+                        vuln = f"  {RED} UNAUTH BYPASS{RESET}" if unauth else ""
                         print(f"{col}[{status}] {meth} {url}{RESET}{sens}{vuln}")
             except KeyboardInterrupt:
                 print(f"\n{YELLOW}[!] Interrupted.[/RESET]")

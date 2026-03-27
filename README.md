@@ -1,109 +1,81 @@
-**SwaggerHunter** A Swagger/OpenAPI enumerator and lightweight endpoint probing tool. Automatically parses Swagger/OpenAPI specifications, lists all API endpoints, applies optional filters (HTTP methods, limits), and can generate:
+**SwaggerHunter** — Swagger/OpenAPI enumerator, exporter and conservative endpoint probe.
 
--   JSON reports of endpoints
+SwaggerHunter automatically parses Swagger/OpenAPI specs (JSON or YAML), resolves local $ref references, enumerates path templates, and can export or probe endpoints. It includes an interactive TUI (requires `rich`) and CLI with options for safe probing, unauthenticated bypass testing, and realistic payload generation via `Faker` when available.
 
--   Postman collections (v2.1)
+What's New / Highlights
+- Resolves local `$ref` and expands `components.pathItems` so nested or referenced path items are enumerated.
+- Optional realistic request payloads using `Faker` (when installed) for better probe coverage.
+- Conservative probing with Safe Mode (skip non-safe methods), retry/backoff, delay, concurrency, proxy and extra headers.
+- Unauthenticated bypass detection: when a bearer token is used you can test whether the endpoint is accessible without it (`--test-unauth`).
+- Scans response bodies for common sensitive patterns (password, api key, tokens) and reports hits.
+- Interactive TUI: scope selection, keyword filters, per-endpoint drilldown, export to JSON/Postman/Burp, and saving probe results.
 
--   Burp Suite XML sitemap
+Features
+- Fetch Swagger/OpenAPI spec from URL or local `file://` path (JSON/YAML).
+- Deep `$ref` resolution and component pathItem expansion.
+- Enumerate endpoints with path templates and generated example URLs.
+- Export enumerated endpoints to JSON, Postman (v2.1), or Burp XML.
+- Optional conservative probing with configurable concurrency, delay, timeout, retries, and safe-mode.
+- Test for unauthenticated bypasses (`--test-unauth`).
+- Scan responses for sensitive data patterns and surface findings.
+- Support for proxies and custom headers (`--proxy`, `--header KEY:VAL`).
+- Interactive TUI with `rich` (if installed): filtering, scope management, exports, and probe dashboards.
 
-It also supports **conservative probing** of endpoints with optional JWT tokens, making it useful for security testing, API discovery, and penetration testing.
+Requirements
+- Python 3.8+
+- See `requirements.txt` for core deps. Optional features:
+  - `pyyaml` for YAML specs
+  - `faker` for realistic payload generation
+  - `rich` for the interactive TUI
 
-**Features**:
-
--   Fetch Swagger/OpenAPI spec from URL or local file
-
--   Enumerate endpoints with path templates and examples
-
--   Filter endpoints by HTTP method or limit
-
--   Export to JSON, Postman, or Burp XML
-
--   Optional probing with status codes and results summary
-
--   Concurrency and rate-limiting options
-
--   Handles JWT Bearer tokens
-
-**Use cases**:
-
--   API security assessments
-
--   Automated Postman collection generation
-
--   Rapid endpoint discovery for bug hunting
-
-## Setup
+Quick Start
+1. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-# Interactive Mode (TUI):
-
-```bash
-python3 swaggerhunter.py
-```
-
-<img width="1315" height="347" alt="image" src="https://github.com/user-attachments/assets/cb1c4b1e-69d0-43ad-8def-777bf201d57a" />
-
-## Screenshot
-
-```bash
-python3 swaggerhunter.py -h
-```
-
-<img width="1909" height="540" alt="image" src="https://github.com/user-attachments/assets/cf14ca64-87ab-489b-80ea-86b6e370915f" />
+2. CLI examples
+- Enumerate and print a summary:
 
 ```bash
 python3 swaggerhunter.py -u 'http://IP:PORT/swagger/v1/swagger.json'
 ```
 
-<img width="1908" height="980" alt="image" src="https://github.com/user-attachments/assets/363fb27d-6d0b-4318-8940-3df5a1502c06" />
-
-## Video
+- Enumerate and export Postman collection:
 
 ```bash
-python3 swaggerhunter.py -u 'http://94.237.123.178:32175/swagger/v1/swagger.json' --probe
+python3 swaggerhunter.py -u 'http://IP:PORT/swagger/v1/swagger.json' --postman collection.json
 ```
 
-https://github.com/user-attachments/assets/733cd15e-9248-45e0-bd58-f20081309d5c
+- Probe endpoints (safe mode enabled to skip destructive methods):
 
 ```bash
-python3 swaggerhunter.py -u 'http://94.237.123.178:32175/swagger/v1/swagger.json' --probe --limit 5 --method GET
+python3 swaggerhunter.py -u 'http://IP:PORT/swagger/v1/swagger.json' --probe --safe-mode
 ```
 
-https://github.com/user-attachments/assets/f42cbf94-1498-4db9-8a3e-30ce5dabb3fe
+- Probe with bearer token and test unauthenticated bypasses:
 
 ```bash
-python3 swaggerhunter.py -u 'http://94.237.123.178:32175/swagger/v1/swagger.json' --probe --method GET --token 'xxxxxxxxxxxxxxxxxxxxxx'
+python3 swaggerhunter.py -u 'http://IP:PORT/swagger/v1/swagger.json' --probe --token 'TOKEN' --test-unauth
 ```
 
-https://github.com/user-attachments/assets/12aa259b-23c7-459e-9873-cdf05d631d60
+- Limit and method filters, plus saving JSON output:
 
 ```bash
-python3 swaggerhunter.py -u 'http://94.237.123.178:32175/swagger/v1/swagger.json' --probe --method GET --token 'xxxxxxxxxxxxxxxxxxxxx' --limit 5 --postman /mnt/d/autoswagger/swaggerapi.json
+python3 swaggerhunter.py -u 'http://IP:PORT/swagger/v1/swagger.json' --limit 50 --method GET --output endpoints.json
 ```
 
-https://github.com/user-attachments/assets/a37f2d10-035b-4120-999d-f4a2f7e13b31
+Interactive Mode (TUI)
 
-# Support
-If my tool helped you land a bug bounty, consider buying me a coffee ☕️ as a small thank-you! Everything I build is free, but a little support helps me keep improving and creating more cool stuff ❤️
----
+```bash
+python3 swaggerhunter.py
+```
 
-<div align="center">
-  <h3>☕ Support My Journey</h3>
-</div>
+The TUI supports scope selection, keyword filtering, threaded probing, exports to Postman/Burp/JSON, and saving probe results.
 
+Next steps
+- If you'd like, I can further improve the README with a full CLI reference of flags and screenshots, or add a short examples section showing typical workflows for bug-bounty recon.
 
-<div align="center">
-  <a href="https://www.buymeacoffee.com/tobiasguta">
-    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" width="200" />
-  </a>
-</div>
-
----
-
-
-
-
-
+Support
+If my tool helped you land a bug bounty, consider buying me a coffee ☕️ as a small thank-you!
